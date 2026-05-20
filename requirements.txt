@@ -1,0 +1,23 @@
+# Core agent framework
+langgraph
+langchain
+langchain-core
+
+# LLM providers (pick whichever you use)
+anthropic
+openai
+
+# Data + validation
+pydantic
+python-dotenv
+
+# Memory layer
+sqlalchemy
+chromadb
+
+# Integrations
+stravalib
+garminconnect
+
+# Dev / tests
+pytest
