@@ -9,7 +9,7 @@ from tools.garmin import poll_new_activity as poll_garmin_activity
 
 logger = structlog.get_logger()
 
-POLL_INTERVAL_SECONDS = 30 * 60   # check for new workouts every 30 minutes
+POLL_INTERVAL_SECONDS = 60 * 60   # check for new workouts every 60 minutes
 WEEKLY_REPLAN_HOUR = 20            # trigger weekly replan at 8pm every Sunday
 SUNDAY = 6
 
