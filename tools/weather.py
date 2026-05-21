@@ -10,7 +10,8 @@ from models.weather import WeatherCondition
 
 logger = structlog.get_logger()
 
-OWM_BASE = "https://api.openweathermap.org/data/3.0/onecall"
+# Free-tier endpoint: 5-day forecast in 3-hour intervals
+OWM_BASE = "https://api.openweathermap.org/data/2.5/forecast"
 
 
 class DailyForecast(BaseModel):
@@ -24,7 +25,6 @@ class WeeklyForecast(BaseModel):
     forecasts: list[DailyForecast]
 
     def for_date(self, d: date) -> Optional[WeatherCondition]:
-        """Look up the forecast for a specific date."""
         for f in self.forecasts:
             if f.date == d:
                 return f.condition
@@ -32,39 +32,54 @@ class WeeklyForecast(BaseModel):
 
 
 def get_forecast(latitude: float, longitude: float) -> WeeklyForecast:
-    """Fetch 7-day daily forecast for the given coordinates."""
+    """Fetch 5-day daily forecast for the given coordinates (free OWM tier)."""
     log = logger.bind(tool="weather.get_forecast", lat=latitude, lng=longitude)
 
     api_key = os.environ["OPENWEATHERMAP_API_KEY"]
     response = httpx.get(OWM_BASE, params={
         "lat": latitude,
         "lon": longitude,
-        "exclude": "current,minutely,hourly,alerts",
         "units": "metric",
         "appid": api_key,
     }, timeout=10)
     response.raise_for_status()
     data = response.json()
 
-    forecasts = [_map_daily(day) for day in data.get("daily", [])]
+    forecasts = _aggregate_daily(data.get("list", []))
     log.info("fetched", days=len(forecasts))
 
     return WeeklyForecast(city_lat=latitude, city_lng=longitude, forecasts=forecasts)
 
 
 # ---------------------------------------------------------------------------
-# Internal mapper
+# Internal helpers
 # ---------------------------------------------------------------------------
 
-def _map_daily(day: dict) -> DailyForecast:
-    dt = datetime.fromtimestamp(day["dt"]).date()
-    weather = day.get("weather", [{}])[0]
+def _aggregate_daily(slots: list[dict]) -> list[DailyForecast]:
+    """Group 3-hour slots by date; use the midday slot (or closest) per day."""
+    by_date: dict[date, list[dict]] = {}
+    for slot in slots:
+        d = datetime.fromtimestamp(slot["dt"]).date()
+        by_date.setdefault(d, []).append(slot)
+
+    result = []
+    for d, entries in sorted(by_date.items()):
+        # Pick the entry whose hour is closest to 12:00 (peak heat, most representative)
+        best = min(entries, key=lambda s: abs(datetime.fromtimestamp(s["dt"]).hour - 12))
+        result.append(_map_slot(d, best))
+    return result
+
+
+def _map_slot(d: date, slot: dict) -> DailyForecast:
+    main    = slot.get("main", {})
+    weather = slot.get("weather", [{}])[0]
+    wind    = slot.get("wind", {})
 
     condition = WeatherCondition(
-        temperature_c=day["temp"]["day"],
-        feels_like_c=day["feels_like"]["day"],
-        humidity_pct=day["humidity"],
-        wind_speed_kmh=day.get("wind_speed", 0) * 3.6,  # m/s → km/h
+        temperature_c=main.get("temp", 25.0),
+        feels_like_c=main.get("feels_like", 25.0),
+        humidity_pct=int(main.get("humidity", 50)),
+        wind_speed_kmh=wind.get("speed", 0) * 3.6,  # m/s → km/h
         description=weather.get("description", ""),
     )
-    return DailyForecast(date=dt, condition=condition)
+    return DailyForecast(date=d, condition=condition)
