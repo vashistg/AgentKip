@@ -74,6 +74,18 @@ class AthleteRow(Base):
         )
 
 
+class AthleteCredentialsRow(Base):
+    __tablename__ = "athlete_credentials"
+
+    athlete_id              = Column(String,  primary_key=True)
+    strava_access_token     = Column(String,  nullable=True)
+    strava_refresh_token    = Column(String,  nullable=True)
+    strava_token_expires_at = Column(Integer, nullable=True)   # Unix timestamp
+    garmin_email            = Column(String,  nullable=True)   # plaintext
+    garmin_password_enc     = Column(String,  nullable=True)   # Fernet-encrypted
+    updated_at              = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PlanRow(Base):
     __tablename__ = "plans"
 
@@ -174,7 +186,58 @@ def load_plan_from_db(athlete_id: str, current: bool) -> Optional[Plan]:
     with Session(engine) as session:
         query = session.query(PlanRow).filter_by(athlete_id=athlete_id, is_current=current)
         if not current:
-            # Most recent previous plan by week start date
             query = query.order_by(desc(PlanRow.week_start_date))
         row = query.first()
         return row.to_plan() if row else None
+
+
+# ---------------------------------------------------------------------------
+# Credentials (per-athlete Strava tokens + encrypted Garmin password)
+# ---------------------------------------------------------------------------
+
+def save_credentials(
+    athlete_id: str,
+    strava_access_token: Optional[str] = None,
+    strava_refresh_token: Optional[str] = None,
+    strava_token_expires_at: Optional[int] = None,
+    garmin_email: Optional[str] = None,
+    garmin_password: Optional[str] = None,
+) -> None:
+    from db.crypto import encrypt
+    with Session(engine) as session:
+        row = session.get(AthleteCredentialsRow, athlete_id)
+        if row is None:
+            row = AthleteCredentialsRow(athlete_id=athlete_id)
+            session.add(row)
+        if strava_access_token is not None:
+            row.strava_access_token = strava_access_token
+        if strava_refresh_token is not None:
+            row.strava_refresh_token = strava_refresh_token
+        if strava_token_expires_at is not None:
+            row.strava_token_expires_at = strava_token_expires_at
+        if garmin_email is not None:
+            row.garmin_email = garmin_email
+        if garmin_password is not None:
+            row.garmin_password_enc = encrypt(garmin_password)
+        row.updated_at = datetime.utcnow()
+        session.commit()
+
+
+def load_credentials(athlete_id: str) -> dict:
+    """
+    Returns a dict with keys: strava_access_token, strava_refresh_token,
+    strava_token_expires_at, garmin_email, garmin_password (decrypted).
+    Missing fields are None.
+    """
+    from db.crypto import decrypt
+    with Session(engine) as session:
+        row = session.get(AthleteCredentialsRow, athlete_id)
+        if row is None:
+            return {}
+        return {
+            "strava_access_token":     row.strava_access_token,
+            "strava_refresh_token":    row.strava_refresh_token,
+            "strava_token_expires_at": row.strava_token_expires_at,
+            "garmin_email":            row.garmin_email,
+            "garmin_password":         decrypt(row.garmin_password_enc) if row.garmin_password_enc else None,
+        }

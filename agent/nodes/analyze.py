@@ -44,6 +44,7 @@ def _analyze_weekly(state: AgentState, log) -> dict:
     trend = _training_load_trend(actual_volume, target_volume, notes)
     goal_progress = _goal_progress(athlete, actual_volume, notes)
     _check_weekly_hr_patterns(workouts, athlete.max_heart_rate, notes)
+    _check_wellness(state.wellness, athlete.resting_heart_rate, notes)
 
     if len(workouts) == 0:
         notes.append("No workouts found in the last 14 days")
@@ -133,6 +134,70 @@ def _check_weekly_hr_patterns(
             f"Elevated HR on {len(anomalous)} easy/recovery runs "
             f"(avg {avg_fraction:.0%} of max HR) — possible fatigue, illness, or overreach"
         )
+
+
+def _check_wellness(wellness, baseline_rhr: int | None, notes: list[str]) -> None:
+    """Add notes from Garmin wellness data: RHR elevation, stress, sleep debt, cadence."""
+    if not wellness:
+        return
+
+    # RHR: flag if recent average is more than 5 bpm above athlete baseline
+    rhr_values = [w.resting_heart_rate for w in wellness if w.resting_heart_rate]
+    if rhr_values and baseline_rhr:
+        avg_rhr = sum(rhr_values) / len(rhr_values)
+        if avg_rhr > baseline_rhr + 5:
+            notes.append(
+                f"Garmin RHR elevated: avg {avg_rhr:.0f} bpm over {len(rhr_values)} days "
+                f"(baseline {baseline_rhr} bpm) — may indicate fatigue or illness"
+            )
+        else:
+            notes.append(
+                f"Garmin RHR stable: avg {avg_rhr:.0f} bpm over {len(rhr_values)} days "
+                f"(baseline {baseline_rhr} bpm)"
+            )
+
+    # Stress: flag if 2+ days were high (≥51), or any single day very-high (≥76)
+    stress_values = [w.avg_stress for w in wellness if w.avg_stress is not None]
+    if stress_values:
+        high_stress_days = sum(1 for s in stress_values if s >= 51)
+        peak_stress = max(stress_values)
+        avg_stress = sum(stress_values) / len(stress_values)
+        if peak_stress >= 76 or high_stress_days >= 2:
+            notes.append(
+                f"Garmin stress elevated: avg {avg_stress:.0f}/100, peak {peak_stress}/100 "
+                f"({high_stress_days} high-stress day(s) of {len(stress_values)}) "
+                f"— may suppress recovery and elevate running HR"
+            )
+        else:
+            notes.append(
+                f"Garmin stress normal: avg {avg_stress:.0f}/100 across {len(stress_values)} days"
+            )
+
+    # Sleep: flag if consistently short
+    sleep_values = [w.sleep_hours for w in wellness if w.sleep_hours]
+    if sleep_values:
+        avg_sleep = sum(sleep_values) / len(sleep_values)
+        if avg_sleep < 7.0:
+            notes.append(
+                f"Garmin sleep deficit: avg {avg_sleep:.1f}h/night over {len(sleep_values)} nights "
+                f"— recovery and adaptation will be impaired"
+            )
+        else:
+            notes.append(
+                f"Garmin sleep adequate: avg {avg_sleep:.1f}h/night over {len(sleep_values)} nights"
+            )
+
+    # Cadence: flag if below optimal range
+    cadence_values = [w.avg_cadence_spm for w in wellness if w.avg_cadence_spm]
+    if cadence_values:
+        avg_cadence = sum(cadence_values) / len(cadence_values)
+        if avg_cadence < 170:
+            notes.append(
+                f"Garmin cadence {avg_cadence:.0f} spm — below optimal 170–180 spm range; "
+                f"consider shorter stride drills"
+            )
+        else:
+            notes.append(f"Garmin cadence {avg_cadence:.0f} spm — within optimal range")
 
 
 # --- post-run check ----------------------------------------------------------

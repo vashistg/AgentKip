@@ -134,13 +134,16 @@ def run() -> None:
          patch("agent.nodes.adapt_plan.get_forecast",            return_value=WEEK2_WEATHER):
 
         graph = graph_module.build_graph()
-        final_state = graph.invoke(AgentState(
-            athlete_id=ATHLETE_ID,
-            run_phase=RunPhase.weekly_replan,
-            cycle_started_at=datetime.now(),
-            current_plan=None,       # no week 2 plan yet — adapt_plan will generate it
-            last_plan=week1_plan,    # week 1 plan for the LLM to diff against
-        ))
+        final_state = graph.invoke(
+            AgentState(
+                athlete_id=ATHLETE_ID,
+                run_phase=RunPhase.weekly_replan,
+                cycle_started_at=datetime.now(),
+                current_plan=None,
+                last_plan=week1_plan,
+            ),
+            config={"configurable": {"thread_id": ATHLETE_ID}},
+        )
 
     plan = (
         final_state.get("current_plan")

@@ -98,7 +98,16 @@ _CREATE_PLAN_TOOL = {
                             },
                         },
                     },
-                    "summary": {"type": "string"},
+                    "summary": {
+                        "type": "string",
+                        "description": (
+                            "3–4 sentences MAX. Format: (1) key signal this week "
+                            "(volume/HR/wellness in one sentence). "
+                            "(2) coaching decision and why. "
+                            "(3) what to watch or the decision gate for next week. "
+                            "No headers, no bullet points, no repetition of athlete name."
+                        ),
+                    },
                 },
             },
         },
@@ -169,7 +178,7 @@ def _adapt_weekly(state: AgentState, log, errors: list[str]) -> dict:
     past_observations = retrieve_relevant(
         athlete_id=athlete_id,
         query=(
-            f"training load {a.training_load_trend}, goal {a.goal_progress}, "
+            f"training load {a.training_load_trend.value}, goal {a.goal_progress.value}, "
             + " ".join(a.notes[:2])
         ),
         n_results=4,
@@ -212,6 +221,9 @@ def _adapt_weekly(state: AgentState, log, errors: list[str]) -> dict:
             f"Volume: {plan.total_volume_km:.1f} km."
         ),
         category="plan_outcome",
+        # Deterministic ID: same week always upserts the existing entry instead of
+        # appending a duplicate when the agent re-runs without new Strava data.
+        observation_id=f"plan_outcome_{athlete_id}_{plan.week_start_date}",
     )
 
     log.info("node_completed", plan_id=plan.id, workouts=len(plan.workouts))
@@ -231,7 +243,7 @@ def _weekly_system_prompt(state: AgentState, past_observations: list[str]) -> st
     return f"""You are an expert running coach building a personalised weekly training plan.
 
 ATHLETE:
-- Name: {athlete.name}  |  Fitness level: {athlete.fitness_level}
+- Name: {athlete.name}  |  Fitness level: {athlete.fitness_level.value}
 - Resting HR: {athlete.resting_heart_rate or "unknown"} bpm  |  Max HR: {athlete.max_heart_rate or "unknown"} bpm
 - Weekly mileage target: {athlete.weekly_mileage_target_km} km
 
@@ -251,6 +263,7 @@ PLAN RULES:
 - HR zones: 1=very easy  2=easy  3=moderate  4=hard  5=max
 - Explain every change from last week in changes_from_last_week using valid activity_type values only
 - If this is the first week with no previous plan, set changes_from_last_week to an empty array []
+- Summary must be 3–4 sentences only: signal → decision → next gate. No headers, no sub-bullets.
 
 Today: {date.today().isoformat()}. Plan week starts: {_next_monday().isoformat()}."""
 
@@ -266,12 +279,28 @@ def _weekly_user_message(state: AgentState) -> str:
             f"Reasoning summary: {state.last_plan.reasoning.summary}"
         )
 
+    wellness_section = ""
+    if state.wellness:
+        lines = []
+        for w in sorted(state.wellness, key=lambda x: x.date)[-7:]:  # last 7 days
+            parts = [str(w.date)]
+            if w.resting_heart_rate:
+                parts.append(f"RHR {w.resting_heart_rate} bpm")
+            if w.avg_stress is not None:
+                parts.append(f"stress {w.avg_stress}/100 ({w.stress_label})")
+            if w.sleep_hours:
+                parts.append(f"sleep {w.sleep_hours}h")
+            if w.avg_cadence_spm:
+                parts.append(f"cadence {w.avg_cadence_spm:.0f} spm")
+            lines.append("  " + "  |  ".join(parts))
+        wellness_section = "\nGARMIN WELLNESS (last 7 days):\n" + "\n".join(lines)
+
     return f"""TRAINING ANALYSIS — last 14 days:
-Load trend: {a.training_load_trend}  |  Goal progress: {a.goal_progress}
+Load trend: {a.training_load_trend.value}  |  Goal progress: {a.goal_progress.value}
 Actual volume: {a.two_week_volume_km:.1f} km  (target: {a.target_two_week_volume_km:.1f} km)
 Observations:
 {chr(10).join(f"  • {n}" for n in a.notes) or "  • No concerns"}
-
+{wellness_section}
 LAST WEEK: {last_week}
 
 Check the weather forecast for {loc.city} (lat {loc.latitude}, lng {loc.longitude}) \
@@ -338,7 +367,7 @@ def _adapt_post_run(state: AgentState, log, errors: list[str]) -> dict:
 def _postrun_system_prompt(state: AgentState) -> str:
     athlete = state.athlete
     return f"""You are monitoring {athlete.name}'s training for injury risk.
-Max HR: {athlete.max_heart_rate or "unknown"} bpm  |  Fitness: {athlete.fitness_level}
+Max HR: {athlete.max_heart_rate or "unknown"} bpm  |  Fitness: {athlete.fitness_level.value}
 
 An anomaly was detected in a recent workout. Decide if the remaining workouts this week
 need to be modified to protect the athlete. Only propose changes for genuine concerns —
@@ -372,6 +401,10 @@ def _run_llm_with_tools(
     output_tool: str,
     log,
 ) -> dict[str, Any] | None:
+    _print_llm_context(system, messages)
+
+    total_in = total_out = 0
+
     for iteration in range(MAX_TOOL_ITERATIONS):
         response = _client.messages.create(
             model=MODEL,
@@ -380,6 +413,10 @@ def _run_llm_with_tools(
             messages=messages,
             tools=tools,
         )
+        usage = response.usage
+        total_in  += usage.input_tokens
+        total_out += usage.output_tokens
+        _print_token_usage(iteration, usage.input_tokens, usage.output_tokens, total_in, total_out, response)
         log.debug("llm_response", stop_reason=response.stop_reason, iteration=iteration)
 
         if response.stop_reason != "tool_use":
@@ -407,6 +444,55 @@ def _run_llm_with_tools(
         ]
 
     return None
+
+
+def _print_llm_context(system: str, messages: list[dict]) -> None:
+    w = 64
+    print(f"\n  ┌{'─'*(w-2)}┐")
+    print(f"  │{'LLM CONTEXT':^{w-2}}│")
+    print(f"  ├{'─'*(w-2)}┤")
+
+    print(f"  │ SYSTEM PROMPT  ({len(system):,} chars){'':{w-32}}│")
+    print(f"  ├{'─'*(w-2)}┤")
+    for line in system.splitlines():
+        # Wrap long lines at (w-4) chars
+        while len(line) > w - 4:
+            print(f"  │ {line[:w-4]} │")
+            line = line[w-4:]
+        print(f"  │ {line:<{w-4}} │")
+
+    for msg in messages:
+        role = msg["role"].upper()
+        content = msg["content"]
+        if isinstance(content, str):
+            print(f"  ├{'─'*(w-2)}┤")
+            print(f"  │ {role} MESSAGE  ({len(content):,} chars){'':{w-32}}│")
+            print(f"  ├{'─'*(w-2)}┤")
+            for line in content.splitlines():
+                while len(line) > w - 4:
+                    print(f"  │ {line[:w-4]} │")
+                    line = line[w-4:]
+                print(f"  │ {line:<{w-4}} │")
+
+    print(f"  └{'─'*(w-2)}┘")
+
+
+def _print_token_usage(
+    iteration: int,
+    input_tokens: int, output_tokens: int,
+    total_in: int, total_out: int,
+    response,
+) -> None:
+    tools_called = [b.name for b in response.content if b.type == "tool_use"]
+    tool_str = f"  tools: {', '.join(tools_called)}" if tools_called else ""
+    print(
+        f"\n  call #{iteration+1}  "
+        f"in={input_tokens:,}  out={output_tokens:,}  "
+        f"stop={response.stop_reason}"
+        f"{tool_str}"
+    )
+    if total_in != input_tokens:
+        print(f"         cumulative  in={total_in:,}  out={total_out:,}  total={total_in+total_out:,}")
 
 
 def _execute_tool(name: str, input: dict[str, Any], log) -> Any:

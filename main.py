@@ -62,25 +62,27 @@ def main(athlete_id: str) -> None:
 
     graph = build_graph()
 
+    # thread_id scopes checkpoints to this athlete — LangGraph resumes from
+    # the last completed node if the process crashes mid-cycle
+    config = {"configurable": {"thread_id": athlete_id}}
+
     # Run until the race goal is complete (graph exits at END).
     # Restart automatically if the graph crashes — transient API failures
     # shouldn't stop a long-running coaching session.
+    first_run = True
     while True:
         try:
-            graph.invoke(initial_state)
+            # First invocation: pass full initial_state so LangGraph creates a
+            # fresh checkpoint. On any subsequent restart: pass None so LangGraph
+            # loads the last checkpoint and resumes from the interrupted node.
+            invoke_input = initial_state if first_run else None
+            first_run = False
+            graph.invoke(invoke_input, config=config)
             logger.info("coach_finished", athlete_id=athlete_id, reason="race_goal_complete")
             break
         except Exception as e:
             logger.error("graph_crashed", error=str(e), restarting_in=RESTART_DELAY_SECONDS)
             time.sleep(RESTART_DELAY_SECONDS)
-            # Reload state from DB so we pick up where we left off
-            initial_state = AgentState(
-                athlete_id=athlete_id,
-                run_phase=_initial_run_phase(),
-                cycle_started_at=datetime.now(),
-                current_plan=load_current_plan(athlete_id),
-                last_plan=load_last_plan(athlete_id),
-            )
 
 
 def _initial_run_phase() -> RunPhase:

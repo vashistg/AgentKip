@@ -51,3 +51,10 @@ Thumbs.db
 .coverage
 htmlcov/
 coverage.xml
+
+# Credentials
+credentials*.csv
+
+# SQLite WAL artefacts
+*.db-shm
+*.db-wal

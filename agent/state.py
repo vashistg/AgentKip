@@ -5,6 +5,7 @@ from typing import Optional
 
 from models.athlete import Athlete
 from models.plan import GoalProgress, Plan, TrainingLoadTrend
+from models.wellness import DailyWellness
 from models.workout import Workout
 
 
@@ -41,6 +42,9 @@ class AgentState:
     # Populated by assess node
     cleared_to_train: bool = True
     assessment_notes: list[str] = field(default_factory=list)
+
+    # Populated by fetch_data node (Garmin wellness — non-fatal if unavailable)
+    wellness: list[DailyWellness] = field(default_factory=list)
 
     # Populated by analyze node
     analysis: Optional[AnalysisResult] = None

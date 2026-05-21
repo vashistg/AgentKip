@@ -116,11 +116,14 @@ def run() -> None:
          patch("agent.nodes.wait.poll_garmin_activity", return_value=None):
 
         graph = graph_module.build_graph()
-        final_state = graph.invoke(AgentState(
-            athlete_id=ATHLETE_ID,
-            run_phase=RunPhase.weekly_replan,
-            cycle_started_at=datetime.now(),
-        ))
+        final_state = graph.invoke(
+            AgentState(
+                athlete_id=ATHLETE_ID,
+                run_phase=RunPhase.weekly_replan,
+                cycle_started_at=datetime.now(),
+            ),
+            config={"configurable": {"thread_id": ATHLETE_ID}},
+        )
 
     plan = (
         final_state.get("current_plan")

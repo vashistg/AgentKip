@@ -154,11 +154,14 @@ def run() -> None:
          patch("agent.nodes.adapt_plan.get_forecast",            return_value=SAMPLE_WEATHER):
 
         graph = graph_module.build_graph()
-        final_state = graph.invoke(AgentState(
-            athlete_id=ATHLETE_ID,
-            run_phase=RunPhase.weekly_replan,
-            cycle_started_at=datetime.now(),
-        ))
+        final_state = graph.invoke(
+            AgentState(
+                athlete_id=ATHLETE_ID,
+                run_phase=RunPhase.weekly_replan,
+                cycle_started_at=datetime.now(),
+            ),
+            config={"configurable": {"thread_id": ATHLETE_ID}},
+        )
 
     # LangGraph returns a dict for dataclass-based state
     plan = (

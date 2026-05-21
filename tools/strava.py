@@ -38,48 +38,73 @@ _REFRESH_BUFFER_SECONDS = 5 * 60  # 5 minutes
 # Token management
 # ---------------------------------------------------------------------------
 
-def _client() -> Client:
+def _client(athlete_id: str) -> Client:
     c = Client()
-    c.access_token = _valid_access_token()
+    c.access_token = _valid_access_token(athlete_id)
     return c
 
 
-def _valid_access_token() -> str:
+def _load_strava_creds(athlete_id: str) -> dict:
+    """Load Strava credentials from DB; fall back to env vars (single-user mode)."""
+    from db.schema import load_credentials
+    db_creds = load_credentials(athlete_id)
+    if db_creds.get("strava_access_token"):
+        return db_creds
+    return {
+        "strava_access_token":     os.environ.get("STRAVA_ACCESS_TOKEN"),
+        "strava_refresh_token":    os.environ.get("STRAVA_REFRESH_TOKEN"),
+        "strava_token_expires_at": int(os.environ.get("STRAVA_TOKEN_EXPIRES_AT", "0")),
+        "_source": "env",
+    }
+
+
+def _valid_access_token(athlete_id: str) -> str:
     """Return a non-expired access token, refreshing if needed."""
-    expires_at = int(os.environ.get("STRAVA_TOKEN_EXPIRES_AT", "0"))
+    creds = _load_strava_creds(athlete_id)
+    expires_at = creds.get("strava_token_expires_at") or 0
     if time.time() < expires_at - _REFRESH_BUFFER_SECONDS:
-        return os.environ["STRAVA_ACCESS_TOKEN"]
+        return creds["strava_access_token"]
 
-    logger.info("strava_token_refreshing", reason="expired_or_missing_expiry")
-    return _refresh_and_persist()
+    logger.info("strava_token_refreshing", reason="expired_or_missing_expiry", athlete_id=athlete_id)
+    return _refresh_and_persist(athlete_id, creds)
 
 
-def _refresh_and_persist() -> str:
-    """Exchange the refresh token for new credentials and write them to .env."""
+def _refresh_and_persist(athlete_id: str, creds: dict) -> str:
+    """Exchange the refresh token for new credentials and persist them."""
     c = Client()
     resp = c.refresh_access_token(
         client_id=os.environ["STRAVA_CLIENT_ID"],
         client_secret=os.environ["STRAVA_CLIENT_SECRET"],
-        refresh_token=os.environ["STRAVA_REFRESH_TOKEN"],
+        refresh_token=creds["strava_refresh_token"],
     )
 
     access_token  = resp["access_token"]
     refresh_token = resp["refresh_token"]
-    expires_at    = str(resp["expires_at"])
+    expires_at    = resp["expires_at"]
 
-    # Update in-process env so subsequent calls in the same cycle use the new token
-    os.environ["STRAVA_ACCESS_TOKEN"]  = access_token
-    os.environ["STRAVA_REFRESH_TOKEN"] = refresh_token
-    os.environ["STRAVA_TOKEN_EXPIRES_AT"] = expires_at
+    # Always update in-process env so subsequent calls in the same cycle use the new token
+    os.environ["STRAVA_ACCESS_TOKEN"]     = access_token
+    os.environ["STRAVA_REFRESH_TOKEN"]    = refresh_token
+    os.environ["STRAVA_TOKEN_EXPIRES_AT"] = str(expires_at)
 
-    # Persist to .env so restarts pick up the new tokens without re-authing
-    _patch_env_file({
-        "STRAVA_ACCESS_TOKEN":   access_token,
-        "STRAVA_REFRESH_TOKEN":  refresh_token,
-        "STRAVA_TOKEN_EXPIRES_AT": expires_at,
-    })
+    if creds.get("_source") == "env":
+        # Single-user mode: persist to .env file
+        _patch_env_file({
+            "STRAVA_ACCESS_TOKEN":     access_token,
+            "STRAVA_REFRESH_TOKEN":    refresh_token,
+            "STRAVA_TOKEN_EXPIRES_AT": str(expires_at),
+        })
+    else:
+        # Multi-user mode: persist refreshed tokens to DB
+        from db.schema import save_credentials
+        save_credentials(
+            athlete_id=athlete_id,
+            strava_access_token=access_token,
+            strava_refresh_token=refresh_token,
+            strava_token_expires_at=int(expires_at),
+        )
 
-    logger.info("strava_token_refreshed", expires_at=expires_at)
+    logger.info("strava_token_refreshed", expires_at=expires_at, athlete_id=athlete_id)
     return access_token
 
 
@@ -120,7 +145,7 @@ def _find_env_file() -> Optional[str]:
 def fetch_strava_activities(athlete_id: str, since: date) -> list[Workout]:
     """Fetch all activities for athlete_id logged on or after `since`."""
     log = logger.bind(tool="strava.fetch_activities", athlete_id=athlete_id, since=since)
-    c = _client()
+    c = _client(athlete_id)
     since_dt = datetime(since.year, since.month, since.day)
     activities = list(c.get_activities(after=since_dt))
     log.info("fetched", count=len(activities))
@@ -130,7 +155,7 @@ def fetch_strava_activities(athlete_id: str, since: date) -> list[Workout]:
 def fetch_strava_activity(athlete_id: str, activity_id: str) -> Workout:
     """Fetch a single activity by ID."""
     log = logger.bind(tool="strava.fetch_activity", activity_id=activity_id)
-    c = _client()
+    c = _client(athlete_id)
     activity = c.get_activity(int(activity_id))
     workout = _map_activity(activity)
     if workout is None:
@@ -141,7 +166,7 @@ def fetch_strava_activity(athlete_id: str, activity_id: str) -> Workout:
 
 def poll_new_activity(athlete_id: str, since: datetime) -> Optional[str]:
     """Return the ID of the most recent activity uploaded after `since`, or None."""
-    c = _client()
+    c = _client(athlete_id)
     activities = list(c.get_activities(after=since, limit=1))
     if activities:
         return str(activities[0].id)
