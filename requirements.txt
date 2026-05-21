@@ -21,3 +21,6 @@ garminconnect
 
 # Dev / tests
 pytest
+
+# Web / onboarding
+flask
