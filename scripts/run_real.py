@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Live run — connects to real Strava, generates a weekly plan for Gaurav.
-Only the wait node is patched (so it doesn't block polling forever).
+Live run — fetches real data and generates a weekly plan for any athlete in the DB.
 
 Usage:
     source .venv/bin/activate
-    python scripts/run_real.py
+    python scripts/run_real.py                        # defaults to gaurav_real_001
+    python scripts/run_real.py --athlete shagun
 """
 import os
 import sys
 import time as _time
+import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _time.sleep = lambda s: None
 
-from datetime import date, datetime, timedelta
+from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -28,101 +29,48 @@ structlog.configure(
     ]
 )
 
-ATHLETE_ID = "gaurav_real_001"
 
-# ---------------------------------------------------------------------------
-# Athlete profile — edit these to match your actual details
-# ---------------------------------------------------------------------------
-ATHLETE_PROFILE = {
-    "id":                        ATHLETE_ID,
-    "name":                      "Gaurav Vashist",
-    "fitness_level":             "intermediate",
-    "weekly_mileage_target_km":  40.0,
-    "resting_heart_rate":        52,
-    "max_heart_rate":            190,
-    "injury_flags":              [],
-    "strava_athlete_id":         "18391711",
-    "goal": {
-        "race_name":             "Mumbai Marathon 2027",
-        "race_type":             "marathon",
-        "race_date":             (date.today() + timedelta(weeks=32)).isoformat(),
-        "race_location": {
-            "city": "Mumbai", "country": "India",
-            "latitude": 19.0760, "longitude": 72.8777, "altitude_m": 10.0,
-        },
-        "training_location": {
-            "city": "Bengaluru", "country": "India",
-            "latitude": 12.9716, "longitude": 77.5946, "altitude_m": 920.0,
-        },
-        "target_finish_seconds": 4 * 3600,   # 4-hour goal
-        "course_elevation_gain_m": 120.0,
-    },
-}
-
-
-def seed_athlete() -> None:
-    from db.schema import AthleteRow, engine
-    from sqlalchemy.orm import Session
-
-    with Session(engine) as session:
-        existing = session.get(AthleteRow, ATHLETE_ID)
-        if existing:
-            session.delete(existing)
-            session.commit()
-
-        p = ATHLETE_PROFILE
-        session.add(AthleteRow(
-            id=p["id"],
-            name=p["name"],
-            fitness_level=p["fitness_level"],
-            weekly_mileage_target_km=p["weekly_mileage_target_km"],
-            resting_heart_rate=p["resting_heart_rate"],
-            max_heart_rate=p["max_heart_rate"],
-            injury_flags=p["injury_flags"],
-            strava_athlete_id=p["strava_athlete_id"],
-            goal=p["goal"],
-        ))
-        session.commit()
-    print(f"✓ Athlete seeded: {p['name']} (Strava ID {p['strava_athlete_id']})")
-
-
-def run() -> None:
-    from db.schema import init_db
+def run(athlete_id: str) -> None:
+    from db.schema import init_db, load_athlete
     from agent.state import AgentState, RunPhase
     from langgraph.graph import END
     import agent.graph as graph_module
     from agent.nodes.wait import _reset
 
     init_db()
-    seed_athlete()
+
+    athlete = load_athlete(athlete_id)
+    if athlete is None:
+        print(f"✗ No athlete found with id={athlete_id!r}")
+        sys.exit(1)
+    print(f"✓ Loaded athlete: {athlete.name} (id={athlete_id})")
 
     # Patch wait node to exit after one cycle instead of polling forever
-    def _real_wait(state: AgentState) -> dict:
+    def _one_shot_wait(state: AgentState) -> dict:
         print("\n✓ Reached wait node — live cycle complete")
         return _reset(state, run_phase=RunPhase.post_run)
 
-    def _real_route_after_wait(_: AgentState) -> str:
+    def _one_shot_route(_: AgentState) -> str:
         return END
 
-    graph_module.wait = _real_wait
-    graph_module._route_after_wait = _real_route_after_wait
+    graph_module.wait = _one_shot_wait
+    graph_module._route_after_wait = _one_shot_route
 
-    print("\n=== Running LIVE agent cycle (real Strava data) ===")
+    print("\n=== Running LIVE agent cycle ===")
     print("(assess → fetch_data → analyze → adapt_plan → wait → END)\n")
 
-    # No patches on fetch_data — real Strava calls go through
     from unittest.mock import patch
-    with patch("agent.nodes.wait.poll_new_activity",  return_value=None), \
+    with patch("agent.nodes.wait.poll_new_activity",   return_value=None), \
          patch("agent.nodes.wait.poll_garmin_activity", return_value=None):
 
         graph = graph_module.build_graph()
         final_state = graph.invoke(
             AgentState(
-                athlete_id=ATHLETE_ID,
+                athlete_id=athlete_id,
                 run_phase=RunPhase.weekly_replan,
                 cycle_started_at=datetime.now(),
             ),
-            config={"configurable": {"thread_id": ATHLETE_ID}},
+            config={"configurable": {"thread_id": athlete_id}},
         )
 
     plan = (
@@ -150,7 +98,6 @@ def run() -> None:
     print(f"    Load trend:    {plan.reasoning.training_load_trend}")
     print(f"    Goal progress: {plan.reasoning.goal_progress}")
     print(f"    Summary:\n")
-    # Word-wrap the summary at 80 chars
     import textwrap
     for line in textwrap.wrap(plan.reasoning.summary, width=90):
         print(f"      {line}")
@@ -167,7 +114,7 @@ def run() -> None:
         notes = f"\n           {w.notes[:100]}…" if w.notes and len(w.notes) > 100 else (f"\n           {w.notes}" if w.notes else "")
         print(f"    {w.date}  {w.date.strftime('%A'):<9}  {w.activity_type.value:<16}  {dist:<9}  {zone}{notes}")
 
-    print("\n\n=== Workouts fetched from Strava ===\n")
+    print("\n\n=== Recent workouts ===\n")
     fetched_athlete = (
         final_state.get("athlete")
         if isinstance(final_state, dict)
@@ -181,4 +128,7 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--athlete", default="gaurav_real_001", help="Athlete ID from the DB")
+    args = parser.parse_args()
+    run(args.athlete)
