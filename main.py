@@ -1,4 +1,5 @@
 import argparse
+import sys
 import time
 from datetime import datetime
 
@@ -31,6 +32,13 @@ def main(athlete_id: str) -> None:
     logger.info("coach_starting", athlete_id=athlete_id)
 
     init_db()
+
+    from db.schema import load_athlete
+    if load_athlete(athlete_id) is None:
+        print(f"\nNo profile found for '{athlete_id}'.")
+        print("Run onboarding first:\n")
+        print("    python scripts/onboard.py\n")
+        sys.exit(1)
 
     current_plan = load_current_plan(athlete_id)
     last_plan = load_last_plan(athlete_id)
