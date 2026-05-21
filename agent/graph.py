@@ -49,9 +49,10 @@ def _summarise(name: str, state: AgentState, result: dict) -> None:
     elif name == "fetch_data":
         athlete = result.get("athlete")
         count = len(athlete.recent_workouts) if athlete and athlete.recent_workouts else 0
+        source = (result.get("workout_source") or "unknown").capitalize()
         wellness = result.get("wellness") or []
-        wellness_str = f"  +  {len(wellness)} wellness day(s) from Garmin" if wellness else ""
-        print(f"  ✓ {count} workout(s) from Strava{wellness_str}")
+        wellness_str = f"  +  {len(wellness)} wellness day(s)" if wellness else ""
+        print(f"  ✓ {count} workout(s) from {source}{wellness_str}")
 
     elif name == "analyze":
         a = result.get("analysis")

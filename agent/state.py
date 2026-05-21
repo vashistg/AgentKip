@@ -43,7 +43,8 @@ class AgentState:
     cleared_to_train: bool = True
     assessment_notes: list[str] = field(default_factory=list)
 
-    # Populated by fetch_data node (Garmin wellness — non-fatal if unavailable)
+    # Populated by fetch_data node
+    workout_source: str = "unknown"   # "garmin" or "strava"
     wellness: list[DailyWellness] = field(default_factory=list)
 
     # Populated by analyze node

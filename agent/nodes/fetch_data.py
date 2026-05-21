@@ -28,23 +28,24 @@ def fetch_data(state: AgentState) -> dict:
 
     errors = list(state.errors)
 
-    # --- Workouts: Strava preferred, Garmin as fallback ---
-    use_strava = bool(athlete.strava_athlete_id)
-    source = "strava" if use_strava else "garmin"
+    # --- Workouts: Garmin preferred, Strava as fallback ---
+    use_garmin = _has_garmin_creds(athlete.id)
+    use_strava = not use_garmin and bool(athlete.strava_athlete_id)
+    source = "garmin" if use_garmin else "strava"
 
     try:
         if state.run_phase == RunPhase.post_run:
-            if use_strava:
-                workouts = [fetch_strava_activity(athlete.strava_athlete_id, state.trigger_workout_id)]
+            if use_garmin:
+                workouts = [fetch_garmin_activity(athlete.id, state.trigger_workout_id)]
             else:
-                workouts = [fetch_garmin_activity(athlete.garmin_user_id, state.trigger_workout_id)]
+                workouts = [fetch_strava_activity(athlete.strava_athlete_id, state.trigger_workout_id)]
             log.info("fetched_trigger_workout", source=source, workout_id=state.trigger_workout_id)
         else:
             since = state.cycle_started_at.date() - timedelta(days=LOOKBACK_DAYS)
-            if use_strava:
-                workouts = fetch_strava_activities(athlete.strava_athlete_id, since=since)
+            if use_garmin:
+                workouts = fetch_garmin_activities(athlete.id, since=since)
             else:
-                workouts = fetch_garmin_activities(athlete.garmin_user_id, since=since)
+                workouts = fetch_strava_activities(athlete.strava_athlete_id, since=since)
             log.info("fetched_recent_workouts", source=source, count=len(workouts), since=since)
 
     except Exception as e:
@@ -65,4 +66,4 @@ def fetch_data(state: AgentState) -> dict:
     updated_athlete = athlete.model_copy(update={"recent_workouts": workouts})
 
     log.info("node_completed", workouts_loaded=len(workouts), wellness_days=len(wellness))
-    return {"athlete": updated_athlete, "wellness": wellness, "errors": errors}
+    return {"athlete": updated_athlete, "wellness": wellness, "errors": errors, "workout_source": source}
